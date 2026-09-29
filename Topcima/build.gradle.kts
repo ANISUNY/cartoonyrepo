@@ -4,14 +4,14 @@ dependencies {
     implementation("org.mozilla:rhino:1.7.13")
 }
 
-version = 5
+version = 1
 
 cloudstream {
-    description = "Movies, series and anime from egibest.org"
+    description = "Movies and series from web.topcinema.io (Topcima)"
     authors = listOf("Mehdi Marsaman")
     language = "ar"
     status = 1
     tvTypes = listOf("Movie", "TvSeries", "Anime")
-    iconUrl = "https://egibest.org/wp-content/uploads/2026/02/egybest_logo2-2.png"
+    iconUrl = "https://web.topcinema.io/wp-content/uploads/2023/05/cropped-icon-32x32.png"
 }
 

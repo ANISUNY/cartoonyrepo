@@ -5,6 +5,12 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 buildscript {
     repositories {
+        // Local mirror of com.github.recloudstream:gradle:master-SNAPSHOT used to
+        // work around a transient JitPack metadata mismatch (published POM's
+        // inner <version> tag disagrees with the GAV, causing Gradle to reject
+        // it with "inconsistent module metadata found").  Remove this repo the
+        // next time recloudstream/gradle is republished cleanly.
+        maven { url = uri("./.m2repo") }
         google()
         mavenCentral()
         // Shitpack repo which contains our tools and dependencies
