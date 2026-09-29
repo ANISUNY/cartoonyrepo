@@ -165,10 +165,10 @@ class Topcima : MainAPI() {
         val title = link.attr("title").ifBlank {
             link.selectFirst("h2, h3, .title, .name")?.text()?.trim() ?: return null
         }
-        val posterUrl = link.selectFirst("img")?.let {
+        val posterUrl: String? = link.selectFirst("img")?.let {
             it.attr("abs:data-src").ifBlank { it.attr("data-src") }
                 .ifBlank { it.attr("abs:src") }.ifBlank { it.attr("src") }
-        }?.trim()?.ifBlank { null }
+        }?.trim()?.takeIf { it.isNotBlank() }
 
         val isMovie = title.contains("فيلم") || href.contains("/movie/", true) || href.contains("/film/", true)
         val isSeries = title.contains("مسلسل") || href.contains("/series/", true) || element.selectFirst(".number, .epnum") != null
@@ -217,11 +217,10 @@ class Topcima : MainAPI() {
                 ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
                 ?: return null
 
-            val poster = document.selectFirst(".MainSingle .left .image img")?.let {
+            val poster: String? = document.selectFirst(".MainSingle .left .image img")?.let {
                 it.attr("abs:data-src").ifBlank { it.attr("abs:src") }
-            }?.ifBlank {
-                document.selectFirst("meta[property=og:image]")?.attr("content")
-            }
+            }?.takeIf { it.isNotBlank() }
+                ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
 
             val plot = document.selectFirst(".story p")?.text()?.trim()
                 ?: document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
@@ -241,8 +240,8 @@ class Topcima : MainAPI() {
                 if (seasonsElements.isNotEmpty()) {
                     episodes = seasonsElements.amap { seasonLink ->
                         val seasonUrl = seasonLink.attr("abs:href").ifBlank { seasonLink.attr("href") }
-                        val seasonPoster = seasonLink.selectFirst("img")?.let {
-                            it.attr("abs:data-src").ifBlank { it.attr("abs:src") }.ifBlank { null }
+                        val seasonPoster: String? = seasonLink.selectFirst("img")?.let {
+                            it.attr("abs:data-src").ifBlank { it.attr("abs:src") }.takeIf { it.isNotBlank() }
                         }
                         val seasonNum =
                             seasonLink.selectFirst(".epnum")?.text()?.replace("الموسم", "")?.trim()
@@ -257,8 +256,8 @@ class Topcima : MainAPI() {
                             val epUrl = ep.attr("abs:href").ifBlank { ep.attr("href") }
                             val data = "$epUrl/watch/||$epUrl/download/"
                             val epTitle = ep.selectFirst("h2")?.text()?.trim()
-                            val epThumb = ep.selectFirst("img")?.let {
-                                it.attr("abs:data-src").ifBlank { it.attr("abs:src") }.ifBlank { null }
+                            val epThumb: String? = ep.selectFirst("img")?.let {
+                                it.attr("abs:data-src").ifBlank { it.attr("abs:src") }.takeIf { it.isNotBlank() }
                             }
                             val episodeNumber =
                                 ep.selectFirst(".epnum")?.text()?.replace("الحلقة", "")?.trim()
@@ -280,8 +279,8 @@ class Topcima : MainAPI() {
                         val epUrl = ep.attr("abs:href").ifBlank { ep.attr("href") }
                         val data = "$epUrl/watch/||$epUrl/download/"
                         val epTitle = ep.selectFirst("h2")?.text()?.trim()
-                        val epThumb = ep.selectFirst("img")?.let {
-                            it.attr("abs:data-src").ifBlank { it.attr("abs:src") }.ifBlank { null }
+                        val epThumb: String? = ep.selectFirst("img")?.let {
+                            it.attr("abs:data-src").ifBlank { it.attr("abs:src") }.takeIf { it.isNotBlank() }
                         }
                         val episodeNumber =
                             ep.selectFirst(".epnum")?.text()?.replace("الحلقة", "")?.trim()
@@ -619,7 +618,7 @@ class Topcima : MainAPI() {
                     // FIX: Primary iframe with correct per-page referer (not mainUrl)
                     watchDoc.selectFirst(".player--iframe iframe")?.attr("abs:src")
                         ?.ifBlank { watchDoc.selectFirst(".player--iframe iframe")?.attr("src") }
-                        ?.trim()?.ifBlank { null }?.let { src ->
+                        ?.trim()?.takeIf { it.isNotBlank() }?.let { src ->
                             val absSrc = if (src.startsWith("http")) src else finalBaseUrl + src
                             extractedLinks[absSrc] = finalWatchUrl
                             if (isSafeFallbackUrl(absSrc)) fallbackCandidates.add(absSrc)
