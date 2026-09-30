@@ -595,7 +595,7 @@ class Topcima : MainAPI() {
         }
     }
 
-    // loadLinks
+    // loadLinks — WebView-first approach (Cloudflare-safe)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -604,140 +604,146 @@ class Topcima : MainAPI() {
     ): Boolean {
         Log.d("Topcima", "loadLinks data=$data")
 
-        val embedUrls = ConcurrentHashMap<String, String>() // url -> referer
+        // data format: "episodeUrl/watch/||episodeUrl/download/"
+        // Primary: the /watch/ URL
+        val watchUrl = data.split("||").firstOrNull { it.contains("/watch/") }
+            ?: data.split("||").firstOrNull { it.startsWith("http") }
+            ?: return false
 
-        suspend fun scrapeWatchPage(watchUrl: String) {
-            val response = try {
-                httpGet(watchUrl, referer = watchUrl.substringBeforeLast("/watch/", watchUrl) + "/")
-            } catch (e: Exception) {
-                Log.w("Topcima", "scrapeWatchPage failed: ${e.message}")
-                return
-            }
-            val finalUrl = response.url
-            val baseUrl = getBaseUrl(finalUrl)
-            val doc = response.document
+        val epBase = watchUrl.substringBeforeLast("/watch/")
+        val referer = "$epBase/"
+        var foundAny = false
 
-            fun addEmbed(src: String) {
-                if (src.isBlank() || src.startsWith("javascript") || src.startsWith("#")) return
-                val abs = if (src.startsWith("http")) src else "$baseUrl$src"
-                if (abs.startsWith("http") && !isImageAsset(abs))
-                    embedUrls.putIfAbsent(abs, finalUrl)
-            }
-
-            // 1. Player iframes visible on page load
-            doc.select(".player--iframe iframe, #player iframe, .video-player iframe")
-                .forEach { addEmbed(it.attr("abs:src").ifBlank { it.attr("src") }) }
-
-            // 2. All iframes on the page
-            doc.select("iframe[src]").forEach { addEmbed(it.attr("abs:src").ifBlank { it.attr("src") }) }
-
-            // 3. data-link / data-embed / data-src attributes on server buttons
-            doc.select("[data-link],[data-embed],[data-src],[data-url]").forEach { el ->
-                listOf("data-link", "data-embed", "data-src", "data-url").forEach { attr ->
-                    val v = el.attr(attr).trim()
-                    if (v.isNotBlank()) addEmbed(v)
+        // ── Step 1: WebViewResolver intercepts the video stream directly ──────
+        try {
+            Log.d("Topcima", "[WV] Trying WebView for $watchUrl")
+            val resolver = WebViewResolver(
+                interceptUrl = Regex("""\.m3u8|\.mp4|/playlist|/index\.m3u8""", RegexOption.IGNORE_CASE),
+                additionalUrls = listOf(Regex("""https?://.*\.(m3u8|mp4).*""", RegexOption.IGNORE_CASE))
+            )
+            val (videoRequest, _) = resolver.resolveUsingWebView(
+                requestCreator("GET", watchUrl, referer = referer, headers = standardHeaders(referer))
+            )
+            val videoUrl = videoRequest?.url?.toString()
+            if (!videoUrl.isNullOrBlank()) {
+                Log.d("Topcima", "[WV] intercepted: $videoUrl")
+                if (videoUrl.contains(".m3u8", true)) {
+                    M3u8Helper.generateM3u8(name, videoUrl, referer).forEach {
+                        callback(it); foundAny = true
+                    }
+                } else {
+                    callback(newExtractorLink(source = name, name = "$name WebView", url = videoUrl,
+                        type = ExtractorLinkType.VIDEO) {
+                        this.referer = referer
+                        this.quality = Qualities.Unknown.value
+                        this.headers = standardHeaders(referer)
+                    })
+                    foundAny = true
                 }
             }
+        } catch (e: Exception) {
+            Log.w("Topcima", "[WV] failed: ${e.message}")
+        }
 
-            // 4. AJAX server buttons — Server.php and admin-ajax.php
-            val serverItems = doc.select(
-                "li.server--item, li[data-id], .watch--servers--list li, .servers-list li, [data-server]"
-            )
-            if (serverItems.isNotEmpty()) {
-                Log.d("Topcima", "Found ${serverItems.size} server items")
-                val ajaxPaths = listOf(
-                    "$baseUrl/wp-content/themes/movies2023/Ajaxat/Single/Server.php",
-                    "$baseUrl/wp-content/themes/Topcima/Ajaxat/Single/Server.php",
-                    "$baseUrl/wp-admin/admin-ajax.php"
+        // ── Step 2: HTTP fallback — try CloudflareKiller + scrape iframes ─────
+        if (!foundAny) {
+            try {
+                Log.d("Topcima", "[HTTP] Trying HTTP scrape for $watchUrl")
+                val response = app.get(
+                    watchUrl,
+                    referer = referer,
+                    headers = standardHeaders(referer),
+                    interceptor = cfInterceptor
                 )
-                serverItems.amap { server ->
-                    val servId    = server.attr("data-id").trim()
-                    val servIdx   = server.attr("data-server").ifBlank { server.attr("data-i") }.trim()
-                    val servPost  = server.attr("data-post").trim()
-                    val servNonce = server.attr("data-nonce").trim()
-                    if (servId.isBlank() && servIdx.isBlank()) return@amap
-                    for (ajaxUrl in ajaxPaths) {
+                val finalUrl = response.url
+                val baseUrl = getBaseUrl(finalUrl)
+                val doc = response.document
+                val html = response.text
+
+                // Collect all embed candidates
+                val embeds = linkedSetOf<String>()
+
+                fun addEmbed(src: String) {
+                    if (src.isBlank() || src.startsWith("javascript") || src.startsWith("#")) return
+                    val abs = if (src.startsWith("http")) src else "$baseUrl$src"
+                    if (abs.startsWith("http") && !isImageAsset(abs)) embeds.add(abs)
+                }
+
+                // Iframes
+                doc.select("iframe[src]").forEach { addEmbed(it.attr("abs:src").ifBlank { it.attr("src") }) }
+
+                // data-* attributes
+                doc.select("[data-link],[data-embed],[data-src],[data-url]").forEach { el ->
+                    listOf("data-link","data-embed","data-src","data-url").forEach { attr ->
+                        val v = el.attr(attr).trim()
+                        if (v.isNotBlank()) addEmbed(v)
+                    }
+                }
+
+                // AJAX server buttons
+                val serverItems = doc.select("li.server--item, li[data-id], [data-server]")
+                if (serverItems.isNotEmpty()) {
+                    val ajaxUrl = "$baseUrl/wp-content/themes/movies2023/Ajaxat/Single/Server.php"
+                    serverItems.amap { server ->
+                        val id  = server.attr("data-id").trim()
+                        val idx = server.attr("data-server").ifBlank { server.attr("data-i") }.trim()
+                        if (id.isBlank() && idx.isBlank()) return@amap
                         try {
-                            val postData = mutableMapOf<String, String>()
-                            if (servId.isNotBlank())    postData["id"]    = servId
-                            if (servIdx.isNotBlank())   postData["i"]     = servIdx
-                            if (servPost.isNotBlank())  postData["post"]  = servPost
-                            if (servNonce.isNotBlank()) postData["nonce"] = servNonce
-                            if (ajaxUrl.endsWith("admin-ajax.php")) postData["action"] = "get_player"
-                            val res = httpPost(ajaxUrl, postData, referer = finalUrl).text
-                            if (res.isBlank() || res == "0" || res == "false") continue
-                            val parsed = Jsoup.parse(res)
-                            parsed.select("iframe[src]").forEach {
+                            val res = app.post(ajaxUrl,
+                                data = mapOf("id" to id, "i" to idx),
+                                referer = finalUrl,
+                                headers = postHeaders(finalUrl),
+                                interceptor = cfInterceptor
+                            ).text
+                            Jsoup.parse(res).select("iframe[src]").forEach {
                                 addEmbed(it.attr("abs:src").ifBlank { it.attr("src") })
                             }
-                            // Also harvest URLs from raw response (JSON / inline HTML)
                             Regex("""https?://[^\s"'<>\\]+""").findAll(res).forEach { m ->
-                                val u = m.value.trimEnd('\\', ')', '"')
+                                val u = m.value.trimEnd('\\', ')', '"', '\'')
                                 if (isSafeFallbackUrl(u)) addEmbed(u)
                             }
-                            if (parsed.select("iframe[src]").isNotEmpty()) break
                         } catch (_: Exception) {}
                     }
                 }
-            }
 
-            // 5. Scan raw page HTML for any extractor-host URLs missed above
-            Regex("""https?://[^\s"'<>\\]+""").findAll(response.text).forEach { m ->
-                val u = m.value.trimEnd('\\', ')', '"')
-                if (isExtractorHost(u) || isPlayableCandidate(u)) addEmbed(u)
-            }
-        }
-
-        val episodeBase = data.split("||").firstOrNull { it.contains("/watch/") }
-            ?.substringBeforeLast("/watch/") ?: ""
-
-        data.split("||").filter { it.isNotBlank() }.amap { rawUrl ->
-            try {
-                when {
-                    rawUrl.contains("/watch/")    -> scrapeWatchPage(rawUrl)
-                    rawUrl.contains("/download/") -> {
-                        val resp = httpGet(rawUrl, referer = "$episodeBase/")
-                        resp.document.select("a[href]").forEach { a ->
-                            val href = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
-                            if (isSafeFallbackUrl(href)) embedUrls.putIfAbsent(href, resp.url)
-                        }
-                    }
-                    rawUrl.startsWith("http") -> embedUrls.putIfAbsent(rawUrl, getBaseUrl(rawUrl))
+                // Raw HTML scan for extractor hosts
+                Regex("""https?://[^\s"'<>\\]+""").findAll(html).forEach { m ->
+                    val u = m.value.trimEnd('\\', ')', '"', '\'')
+                    if (isExtractorHost(u) || isPlayableCandidate(u)) addEmbed(u)
                 }
-            } catch (e: Exception) { logError(e) }
-        }
 
-        Log.d("Topcima", "Collected ${embedUrls.size} embed URLs")
+                Log.d("Topcima", "[HTTP] Found ${embeds.size} embed candidates")
 
-        var foundAny = false
-        val tried = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
-
-        embedUrls.entries.toList().amap { (rawLink, referer) ->
-            val link = unwrapPlayUrl(rawLink)
-            if (!tried.add(link)) return@amap
-            Log.d("Topcima", "Trying: $link")
-            try {
-                val ok = when {
-                    link.contains("vidtube", ignoreCase = true) ->
-                        extractVidtube(link, referer, callback)
-                    else -> {
-                        var r = loadExtractor(link, referer, subtitleCallback, callback)
-                        if (!r) r = loadExtractor(link, getBaseUrl(referer), subtitleCallback, callback)
-                        if (!r) {
+                // Try each embed
+                val tried = mutableSetOf<String>()
+                embeds.toList().amap { rawEmbed ->
+                    val link = unwrapPlayUrl(rawEmbed)
+                    if (!tried.add(link)) return@amap
+                    try {
+                        var ok = when {
+                            link.contains("vidtube", ignoreCase = true) ->
+                                extractVidtube(link, finalUrl, callback)
+                            else -> loadExtractor(link, finalUrl, subtitleCallback, callback)
+                        }
+                        if (!ok) {
                             try {
-                                val html = app.get(
-                                    link, referer = referer,
-                                    headers = standardHeaders(referer),
-                                    interceptor = cfInterceptor
-                                ).text
-                                r = extractDirectStreams(html, link, getBaseUrl(referer), callback)
+                                val iHtml = app.get(link, referer = finalUrl,
+                                    headers = standardHeaders(finalUrl),
+                                    interceptor = cfInterceptor).text
+                                ok = extractDirectStreams(iHtml, link, baseUrl, callback)
                             } catch (_: Exception) {}
                         }
-                        r
-                    }
+                        if (ok) foundAny = true
+                    } catch (_: Exception) {}
                 }
-                if (ok) foundAny = true
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                Log.w("Topcima", "[HTTP] scrape failed: ${e.message}")
+            }
+        }
+
+        // ── Step 3: WebView iframe interceptor fallback ───────────────────────
+        if (!foundAny) {
+            foundAny = resolveWithWebView(watchUrl, referer, callback)
         }
 
         Log.d("Topcima", "loadLinks done foundAny=$foundAny")

@@ -4,7 +4,7 @@ dependencies {
     implementation("org.mozilla:rhino:1.7.13")
 }
 
-version = 1
+version = 2
 
 cloudstream {
     description = "Movies and series from web.topcinema.io (Topcima)"
