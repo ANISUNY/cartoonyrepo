@@ -493,6 +493,29 @@ class StarDima : MainAPI() {
         Log.d("StarDima", "loadLinks: $data")
         var found = false
 
+        // --- Case 0 (FIX): hyperwatching.com/watch/ID (v2.hyperwatching.com or hyperwatching.com)
+        if (data.contains("hyperwatching.com/watch/")) {
+            val id = data.substringAfter("/watch/")
+                .substringBefore("?").substringBefore("/").trim()
+            if (id.isNotBlank()) {
+                found = tryHyperwatching("$hwUrl/iframe/$id", subtitleCallback, callback)
+                if (found) return true
+                found = tryHyperwatching("https://v2.hyperwatching.com/iframe/$id", subtitleCallback, callback)
+                if (found) return true
+            }
+            try {
+                val resp = app.get(data, headers = hdrs("$mainUrl/"))
+                for (iframe in resp.document.select("iframe[src]")) {
+                    val src = iframe.attr("abs:src").trim()
+                    if (src.startsWith("http") &&
+                        loadExtractor(src, data, subtitleCallback, callback)) return true
+                }
+                if (tryExtractStreams(resp.text, data, callback)) return true
+            } catch (t: Throwable) {
+                Log.e("StarDima", "watch page: ${t.message}")
+            }
+        }
+
         // --- Case 1: hyperwatching.com iframe URL (most common from episodes)
         if (data.contains("hyperwatching.com/iframe/")) {
             found = tryHyperwatching(data, subtitleCallback, callback)
